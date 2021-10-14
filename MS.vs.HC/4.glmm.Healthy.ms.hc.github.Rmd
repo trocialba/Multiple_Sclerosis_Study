@@ -1,0 +1,554 @@
+---
+title: "Differential abundance MS baseline vs HC Stool with glmmTMB"
+author: "Alba Troci"
+date: "`r Sys.Date()`"
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged
+      self_contained: true
+      code_download: true
+      highlight: tango
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+
+# Preparations {.tabset}
+
+## Description
+
+Set global options + Load libraries
+
+## Global options
+
+```{r style, results="asis", cache=FALSE, message = F}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+
+
+# Pretty outputs
+library("rmarkdown")
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+library("ggpubr")
+
+# Set seed for reproducibility
+set.seed(100)
+
+# Set plotting theme
+theme_set(theme_few(base_size = 14))
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+
+## Libraries
+```{r libraries, message=FALSE}
+library("magrittr")
+library("ggplot2")
+library("tidyverse")
+library("readxl")
+library("dada2")
+library("phyloseq")
+library("gridExtra")
+library("vegan")
+library("plyr")
+library("scales")
+library("reshape2")
+library("DESeq2")
+library("dplyr") #for data manipulation
+library("msa") #multiple sequence alignment
+library("ape") #to create phylogenetic tree
+library("randomForest") 
+library("caret") 
+library("broom")
+library("mlbench")
+library("plotROC")
+library("Matrix")
+library("limma")
+library("Glimma")
+library("edgeR")
+library("BiocParallel")
+library("variancePartition")
+library("statmod")
+library("glmmTMB")
+library("bbmle")
+library("LaplacesDemon")
+library("MuMIn")
+library("DHARMa")
+library("sjmisc")
+library("sjstats")
+library("lme4")
+library("emmeans")
+library("RColorBrewer")
+library("rio")
+```
+
+# Introduction
+
+**Question:**
+Which are differentially expressed taxa between MS patients (baseline) and HC?
+
+**Method:** glmmTMB.
+
+**Description:** 
+
+1. I have otu_table, taxa_table and sample_data merged as phyloseq object for 
+MS patients in baseline and Healthy controls.
+
+2. Filter low abundant and low prevalent taxa. 
+
+3. Prepare covariates for the model: for each ASV we need a matrix with 
+columns = c("Abundance", "Subject or Participant name", "Status" and "Sampling Depth").
+
+4. Fit the model for each ASV: 
+  
+  - fit glmmTMB (formula: Abundance ~ Status).
+
+  - compute logFoldChange and baseMean.
+
+
+# Import data {.tabset}
+
+## Description 
+
+Import data (sample_data, otu_table, tax_table) organised in a phyloseq object
+
+
+## Phyloseq object
+
+## Import data: no agglomeration
+```{r import data}
+# Phyloseq object: Filtered ASV based from MS+Healthy samples 
+d.ps1_HMS <- "~/IKMB/projects/MS/github.codes.ms/ms.vs.hc/data"
+ps1_HMS <- "ps_HMS.subset.stool.itm.rds" %>%
+  paste0(d.ps1_HMS,"/", .) %>% 
+  readRDS() 
+ps1_HMS
+
+```
+
+
+## Edit
+```{r}
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "Healthy"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "MS"])
+```
+
+```{r}
+sample_data(ps1_HMS)$TimePoint[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "TP0"
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "HC"
+```
+
+```{r}
+ps.hms <- subset_samples(ps1_HMS, Status %in% c("HC", "MS"))
+ps.hms
+
+sam <- data.frame(sample_data(ps.hms))
+```
+
+Sample overview, subset only baseline samples
+
+```{r}
+ps_merge <- subset_samples(ps.hms, TimePoint %in% c("TP0", "TP1"))
+sample <- data.frame(sample_data(ps_merge))
+```
+
+
+# Prepare covariates for the model {.tabset}
+
+## Description
+
+1.Sample Table: 
+Extract variables of interest from sample_data for both MS patients and Healthy controls
+
+2.Taxa Table: 
+Subset new taxa table from otu_table(ps_ST) for the remaining samples. 
+
+## Sample+Taxa tables 
+
+**Subset Sample Table**
+```{r}
+dim(sample_data(ps_merge)[sample_data(ps_merge)$Status %in% "HC"])
+dim(sample_data(ps_merge)[sample_data(ps_merge)$Status %in% "MS"])
+```
+
+```{r}
+#Covariates:Time, Treatment(ocrevus+no ocrevus)
+#extract unique samples
+dat <- data.frame(SampleID=sample_names(ps_merge),
+                  Status=sample_data(ps_merge)$Status,
+                  Age=sample_data(ps_merge)$Age,
+                  Sex=sample_data(ps_merge)$Sex,
+                  Depth = sample_sums(ps_merge),
+                  stringsAsFactors=FALSE)
+
+```
+
+
+```{r}
+#replace status names with characters
+tab <- dat %>%
+  mutate(Status=ifelse(Status=='MS','1',
+                          ifelse(Status=='HC','0',NA)))
+
+#convert status column to factor
+tab <- mutate_at(tab, vars(Status), as.factor)
+
+#otu table
+taxatable1 <- data.frame(otu_table(ps_merge))
+```
+
+
+# Filter {.tabset}
+
+## Description
+
+I will filter the updated taxa table (taxatable1) from low abundant taxa.
+
+1.Abundance filter:
+Extract taxa (ASV here) that have total abundance at least 50 taxa per sample.
+
+2.Prevalence filter:
+Extract taxa that are present at least 5% in all samples.
+
+## Abundance filter
+```{r}
+#ASV that have 0 total counts in all 69 samples
+table(colSums(taxatable1==0)==nrow(dat))
+
+#delete ASV that have total abundance in each sample less than 50
+taxatable2 <- taxatable1[,colSums(taxatable1) > 50] %>% na.omit()
+
+```
+
+```{r}
+#total nr of counts of each ASV after abundance filtering
+summary(colSums(taxatable2))
+sample_sum_df <- data.frame(sum = colSums(taxatable2))
+
+# Histogram of sample read counts
+p <- ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "indianred", binwidth = 500) +
+  ggtitle("Distribution of total abundances") + 
+  xlab("Read counts") +
+  ylab("Frequency") +
+  theme(axis.title.y = element_blank())
+p
+```
+
+## Prevalence filter
+```{r}
+#filter based prevalence
+#count nr of elements not 0 in each column
+a <- data.frame(prev = (colSums(taxatable2 != 0 )))
+
+#take only columns that have more than 2 non zero elements 
+#(5% of 69   total samples=1.45)
+b <- subset(a, prev >= 0.05*nrow(dat))
+
+taxatable <- taxatable2[, (colSums(taxatable2 != 0 ) >= 0.05*nrow(dat))] %>% na.omit()
+```
+
+
+```{r}
+#total nr of counts of each ASV
+summary(colSums(taxatable))
+sample_sum_df <- data.frame(sum = colSums(taxatable))
+
+# Histogram of sample read counts
+p <- ggplot(sample_sum_df, aes(x = sum)) + 
+  geom_histogram(color = "black", fill = "indianred", binwidth = 500) +
+  ggtitle("Distribution total abundances") + 
+  xlab("Read counts") +
+  ylab("Frequency") +
+  theme(axis.title.y = element_blank())
+p
+
+```
+
+
+**Subset taxonomy table**
+Subset taxonomy table tax_table(ps_ST) to the remaining taxa after filtering
+
+```{r}
+b <- colnames(taxatable)
+a <- tax_table(ps_merge)
+taxonomy <- subset_taxa(a, rownames(tax_table(ps_merge)) %in% b)%>% data.frame()
+
+taxonomy$ASV1 <- rownames(taxonomy)
+dim(taxonomy)
+dim(taxatable)
+```
+
+## Design
+
+```{r}
+#Prepare design matrix
+Status <- factor(paste(tab$Status ))
+design = model.matrix(~0+ Status)
+design
+tabt <- cbind(tab, design)
+colnames(design) <- levels(Status)
+
+#check if we have column with all zeros and delete it
+all.zero <- apply(design, 2, function(x) all(x==0))
+all.zero
+
+#we need contrasts.arg for glmmTMB model 
+contrasts.arg=list(Status=contrasts(as.factor(tabt$Status)))  
+contrasts.arg
+
+```
+
+
+# Fit glmmTMB
+
+I will fit glmmTMB (family nbinom2) for each ASV in taxatable. We do not have 
+correlation between MS patients and Healthy controls (they are different participants), 
+therefore we will not use a random effect in glmmTMB model.
+
+
+* Create covariate matrix, X.
+
+* Fit glmmTMB(Abundance ~ Status).
+
+* Compute "logFoldChange" and "baseMean".
+
+
+```{r, warning=FALSE, message=FALSE}
+#Create a matrix to hold taxa
+fail <- list()
+warn <- list()
+taxa_all <- colnames(taxatable)
+data_out <- data.frame()
+counter=0
+for (tax in taxa_all){
+  counter <- counter +1
+  
+  #Covariate matrix
+  X <- data.frame(
+  ab <- taxatable[[tax]],
+  tab[,c('SampleID','Status', 'Depth')])
+  names(X)[1] <- "Abundance"
+  
+  #cat(tax,'\n')
+  data_out[counter,"taxon"] <- tax
+  data_out[counter,"Abundance"] <- sum(X$Abundance)
+  data_out[counter,"Prevalence"] <- length(which(X$Abundance != 0))
+  
+  tryCatch({
+    #Fit model 
+    fit_nbinom2 <- glmmTMB(Abundance~Status
+                              +offset(log(Depth)),
+                              data=X,
+                              #ZI parameter applying to all observations
+                              ziformula=~1, 
+                              contrasts = contrasts.arg,
+                              family=nbinom2)
+  
+    #Extract results  
+    res_anova <- as.matrix(glmmTMB:::Anova.glmmTMB(fit_nbinom2, type = c("II"))) 
+  
+    data_out[counter,"Chisq"] <- res_anova[1,1]
+    data_out[counter,"df"]  <- res_anova[1,2]
+    data_out[counter,"P"]  <- res_anova[1,3]
+  
+    #Extract logFoldChange and baseMean
+    emm <- as.matrix(emmeans(fit_nbinom2, poly ~ Status))
+  
+    
+    #marginal means for cluster1(MS), cluster2(Healthy)
+    emm1 <- as.data.frame(emm[[1]])
+    baseMean <- (emm1$emmean[1]+emm1$emmean[2])/2
+    
+    #logFoldChange
+    emm2 <- as.data.frame(emm[[2]])
+    logFoldChange <- emm2$estimate
+    
+    #Update result table
+    data_out[counter,"baseMean"]  <- baseMean
+    data_out[counter, "logFoldChange"] <- logFoldChange
+    
+    
+  },error = function(c) { 
+      print(c$message)
+      fail[tax] <<- 2},
+   warning = function(w){
+     
+     warn[tax] <<- 1
+     })
+}
+
+```
+
+
+```{r}
+#take out ASV with warning, see recommendation at [8].
+data_clean1 <- subset(data_out, !(taxon %in% names(warn)))
+
+#ASV with baseMean<0 have very high p value (very close to 1), we are not 
+#interested in these ASV, therefore we subset them out.
+data_clean <- subset(data_clean1, baseMean > 0)
+data_clean
+```
+
+
+## Distribution of p values
+```{r, warning=FALSE}
+hist(data_clean$P, main="P-values MS:Healthy",xlab="pvalues") 
+```
+
+Comment: Distribution of p values is anti-conservative scenario (see [7]), 
+the peak close to 0 is where alternative hypotheses live- along with some potential false positives. 
+We will use multiple hypothesis test correction (Bonferroni and FDR correction) 
+to figure out where best to place the cutoff for significance.
+
+## Adjusted pvalues
+```{r, warning=FALSE}
+data_clean$P.adj.bon <- p.adjust(data_clean$P,"bon")
+data_clean$P.adj.fdr <- p.adjust(data_clean$P,"fdr")
+data_clean$P.adj.holm <- p.adjust(data_clean$P,"holm")
+
+res <- data.frame(ASV1=data_clean$taxon,
+                  Abundance=data_clean$Abundance,
+                  Prevalence=data_clean$Prevalence,
+                  log2FoldChange=data_clean$logFoldChange,
+                  baseMean=data_clean$baseMean,
+                  Chisq=data_clean$Chisq,
+                  df=data_clean$df,
+                  P=data_clean$P, 
+                  padj=data_clean$P.adj.holm)
+
+#Result table
+res_order <- res[order(res$padj),] %>% na.omit()
+rownames(res_order) <- res_order$ASV1
+```
+
+```{r}
+#taxa with p value <0.05
+sig_pvalue <- res_order[(res_order$padj ) <0.05 , ] %>% 
+  na.omit()
+
+#print only significant abundant taxa
+sig_pvalue
+
+```
+
+
+## Plot MA
+Contrast: MS-Healthy
+Up regulated taxa corespond to MS and Down regulated taxa to Healthy patients.
+```{r}
+#Plot
+maplot <- ggmaplot(res_order, fdr = 0.05, fc = 1, genenames = NULL, 
+                   main = "Constrast:MS.stool.TP1-Healthy",
+                   detection_call = NULL, size = 1,
+                   palette = c("#B31B21", "#1465AC", "darkgray"),
+                   legend="top", top = 15,font.label = c("bold", 10),
+                   label.rectangle = TRUE, font.legend = c("bold",12),
+                   font.main = "bold")
+maplot
+
+```
+
+## Plot significant taxa
+
+Assign taxonomy to ASV that have significant p value:
+```{r, warning=FALSE}
+
+treat_p_tax <- merge(sig_pvalue, taxonomy, by= "ASV1")
+treat_p_tax
+```
+
+ASVs that were significantly different between the two groups (MS vs HC):
+
+```{r}
+
+my.cols <- brewer.pal(3, "Spectral")
+my.cols
+
+my.colors <- c("#D7191C", "#FDAE61", "#ABDDA4", "#2B83BA")
+my.colors
+```
+
+```{r}
+theme_set(theme_bw())
+sigtabgen <- treat_p_tax
+sigtabgen = subset(sigtabgen, !is.na(Genus))
+# Phylum order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$Phylum, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$Phylum = factor(as.character(sigtabgen$Phylum), levels=names(x))
+# Genus order
+x = tapply(sigtabgen$log2FoldChange, sigtabgen$Genus, function(x) max(x))
+x = sort(x, TRUE)
+sigtabgen$Genus = factor(as.character(sigtabgen$Genus), levels=names(x))
+fig <- ggplot(sigtabgen, aes(y=Genus, x=log2FoldChange, color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", size = 0.5) +
+  geom_point(aes(size=sigtabgen$baseMean)) + 
+  scale_size(range = c(1,3))+
+  labs( size = "baseMean")+
+  ggtitle("HC                                                                  MS")+
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5), 
+        text = element_text(size = 8),
+        plot.title = element_text(size = 6)) +
+    scale_color_brewer(palette = "Dark2")
+
+fig
+
+stool.ms.subset.hc.baseline <- fig
+
+#ggsave("stool.ms.subset.hc.baseline.png")
+```
+
+# save output
+
+```{r}
+#export(treat_p_tax, "MS.stool.diff.abundance.subset.healthy.baseline.xlsx")
+```
+
+# References
+1. cran glmmTMB description.
+
+https://cran.r-project.org/web/packages/glmmTMB/glmmTMB.pdf
+
+2. paper.
+
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6346533/#!po=42.0000
+
+3. after fitting.
+https://cran.r-project.org/web/packages/glmmTMB/vignettes/model_evaluation.pdf
+
+4. for log fold changes.
+https://www.biostars.org/p/300349/ 
+
+5. glmmTMB warnings.
+http://cran.uni-muenster.de/web/packages/glmmTMB/vignettes/troubleshooting.html
+
+6. math:
+https://arxiv.org/pdf/1509.00660.pdf
+
+7. pvalues distribution
+http://varianceexplained.org/statistics/interpreting-pvalue-histogram/
+
+8. exclusion of ASV with warnings:
+https://mran.microsoft.com/snapshot/2017-12-11/web/packages/glmmTMB/vignettes/troubleshooting.html
