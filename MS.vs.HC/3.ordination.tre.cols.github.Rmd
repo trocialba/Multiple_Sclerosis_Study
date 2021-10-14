@@ -1,0 +1,324 @@
+---
+title: "Beta diversity + Ordination: MS vs HC stool"
+author: "Alba Troci"
+date: "`r Sys.Date()`"  
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged
+      self_contained: true  
+      code_download: true
+      highlight: tango
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+
+# Preparations
+## Set global options
+
+```{r style, results="asis", cache=FALSE, message = F, echo=FALSE}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+  
+
+# Pretty outputs
+library("rmarkdown")
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+library("ggpubr")
+
+# Set seed for reproducibility
+set.seed(100)
+
+# Set plotting theme
+theme_set(theme_few(base_size = 14))
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+
+## Load libraries for the session
+```{r libraries, message=FALSE}
+library("magrittr")
+library("ggplot2")
+library("tidyverse")
+library("readxl")
+library("dada2")
+library("phyloseq")
+library("gridExtra")
+library("vegan")
+library("plyr")
+library("scales")
+library("reshape2")
+library("DESeq2")
+library("dplyr") #for data manipulation
+library("msa") #multiple sequence alignment
+library("ape") #to create phylogenetic tree
+library("randomForest") 
+library("caret") 
+library("broom")
+library("mlbench")
+library("plotROC")
+library("gg3D")
+library("scatterplot3d")
+library("car")
+library("rgl")
+library("rglwidget")
+library("rio")
+
+```
+
+## Import data
+```{r import data}
+# Phyloseq object: Filtered ASV based from MS+Healthy samples 
+d.ps1_HMS <- "~/IKMB/projects/MS/github.codes.ms/ms.vs.hc/data"
+ps1_HMS <- "ps_HMS.subset.stool.itm.rds" %>%
+  paste0(d.ps1_HMS,"/", .) %>% 
+  readRDS() 
+ps1_HMS
+
+```
+
+```{r}
+cols <- c("royalblue4", "tomato4", "orange3")
+```
+
+## Edit
+```{r}
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "Healthy"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "MS"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Ocrevus %in% "yes"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Ocrevus %in% "no"])
+```
+
+```{r}
+sample_data(ps1_HMS)$TimePoint[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "TP0"
+
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "HC"
+
+sample_data(ps1_HMS)$Group[sample_data(ps1_HMS)$Status %in% "HC"] <- "HC"
+sample_data(ps1_HMS)$Group[sample_data(ps1_HMS)$Ocrevus %in% "yes"] <- "MS-O"
+sample_data(ps1_HMS)$Group[sample_data(ps1_HMS)$Ocrevus %in% "no"] <- "MS-nO"
+
+```
+
+
+All samples
+```{r}
+ps.hms <- subset_samples(ps1_HMS, Status %in% c("HC", "MS"))
+ps.hms
+
+```
+
+Only baseline samples
+```{r}
+ps.1 <- subset_samples(ps.hms, TimePoint %in% c("TP0", "TP1"))
+ps.1
+
+```
+
+
+
+# Beta diversity
+
+  * How different is the microbial composition in one environment compared to another?
+  * We compute the dissimilarity matrix using one of the appropriate distances 
+  for microbiome data: Bray-Curtis.
+    
+
+## Distance matrix
+```{r}
+#Bray-Curtis for Stool samples:
+bray_dist.merge = phyloseq::distance(ps.hms, method="bray", weighted=T)
+```
+
+
+# Ordination
+
+Measures the similarity of the samples and projects this measure into 2-dimensions.
+
+## NMDS 
+
+**Stress**: value representing the difference between distance in the reduced 
+dimension compared to the complete multidimensional space.
+
+**NMDS**: tries to minimize the stress value using gradient decent.
+
+## Only baseline MS-O, MS-nO vs HC Stool
+
+```{r}
+# Plot NMDS: using bray distances by defult. 
+ordination2 <- ordinate(ps.1, method = "NMDS" )
+ordination2
+
+#Add centroids
+NMDS1 <- ordination2$points[,1]
+NMDS2 <- ordination2$points[,2]
+
+Group <- sample_data(ps.1)$Group
+df <- data.frame(Group, NMDS1, NMDS2)
+```
+
+Plot ordination
+```{r}
+oo <- ggscatterhist(
+ df, x = "NMDS1", y = "NMDS2",
+ color = "Group", size = 0.9, alpha = 1,
+ palette = c("royalblue4", "tomato4", "orange3"),
+ margin.plot = "boxplot",
+ margin.plot.size = 2,
+ ggtheme = theme(text = element_text(size = 15))
+)
+oo
+
+nmds.hms.all.tp.second2 <- oo
+#ggsave("nmds.hms.all.tp.second2.png")
+
+```
+
+# Homogeneity of group dispersions MS vs HC
+
+NOTE1: We have to do test of homogeneity of group dispersions was not significant, 
+meaning the significance of the permutational multivariate ANOVA was due to 
+differences in the centroid of the groups and not due to differences in group 
+dispersions.
+
+NOTE2: PERMANOVA, like all statistical tests, has certain assumptions about 
+sampling variability. While it does not assume normality, it DOES assume equal beta 
+dispersion between groups. SO, if your "betadisper" test (see below) shows that your 
+groups have significantly different dispersions, you should use ANOSIM rather than 
+PERMANOVA to look at mean differences between groups in beta diversity space.
+
+Sometimes it will be clear from NMDS that one group tends to vary more (be more 
+spread out) than another group.we can test this statistically with multivariate 
+homogeneity of group dispersion (variances).
+
+```{r}
+bray1 = phyloseq::distance(ps.1, method="bray", weighted=T)
+```
+
+```{r}
+#Calculate dispersion (variances) within each group.
+disp.group = betadisper(bray1, sample_data(ps.1)$Status)
+
+#Perform an ANOVA-like test to determine if the variances differ by groups.
+permutest(disp.group, pairwise=TRUE, permutations=1000)
+```
+
+Comment1: betadisper function does not show significant differences between Groups, 
+therefore we will use Permanova test.
+
+
+
+# Multivariate: Permanova MS vs HC
+
+**Aim**: test of differences in microbial composition between 2 or more groups of samples.
+
+**Method**: PERMANOVA
+
+**Hypothesis testing**: centroids of clusters Before and After treatment differ.
+
+**Statistics**: test for simmilarity based on a chosen distance (here Bray-Curtis).
+
+  
+```{r}
+# Healthy~MS samples
+permanova1 <- adonis2(bray1 ~ sample_data(ps.1)$Status)
+permanova1
+```
+
+
+```{r}
+#tables
+t1 <- data.frame(Status = "MS.baseline vs HC",
+                 Test = "Adonis",
+                 Distance = "Bray",
+                 SumOfSqs = permanova1$SumOfSqs[1],
+                 R2 = permanova1$R2[1],
+                 F = permanova1$F[1],
+                 Pvalue = permanova1$`Pr(>F)`[1])
+```
+
+# save output
+
+```{r}
+#export(t1, "MS.stool.HC.ordination.baseline.xlsx")
+```
+
+
+
+# Multivariate: Permanova MS-O vs HC
+
+Select only samples from MS-O and HC
+```{r}
+ps.hmso <- subset_samples(ps.1, Group %in% c("MS-O", "HC"))
+ps.hmso
+```
+
+```{r}
+bray2 = phyloseq::distance(ps.hmso, method="bray", weighted=T)
+```
+
+```{r}
+#Calculate dispersion (variances) within each group.
+disp.group2 = betadisper(bray2, sample_data(ps.hmso)$Group)
+
+#Perform an ANOVA-like test to determine if the variances differ by groups.
+permutest(disp.group2, pairwise=TRUE, permutations=1000)
+```
+
+Because groups have significantly different dispersions, we will use ANOSIM 
+
+```{r}
+anosim2 <- anosim(bray2, sample_data(ps.hmso)$Group)
+anosim2
+```
+
+# Multivariate: Permanova MS-nO vs HC
+
+Select only samples from MS-nO and HC
+```{r}
+ps.hms.no <- subset_samples(ps.1, Group %in% c("MS-nO", "HC"))
+ps.hms.no
+```
+
+```{r}
+bray3 = phyloseq::distance(ps.hms.no, method="bray", weighted=T)
+```
+
+```{r}
+#Calculate dispersion (variances) within each group.
+disp.group3 = betadisper(bray3, sample_data(ps.hms.no)$Group)
+
+#Perform an ANOVA-like test to determine if the variances differ by groups.
+permutest(disp.group3, pairwise=TRUE, permutations=1000)
+```
+
+Because groups do not have significantly different dispersions, we will use Adonis 
+
+```{r}
+permanova3 <- adonis2(bray3 ~ sample_data(ps.hms.no)$Group)
+permanova3
+
+```
+
+# Session info
+
