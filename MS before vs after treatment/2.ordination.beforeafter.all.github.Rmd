@@ -1,0 +1,284 @@
+---
+title: "Beta diversity + Ordination MS before vs after treatment, stool"
+author: "Alba Troci"
+date: "`r Sys.Date()`"  
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged 
+      self_contained: true
+      code_download: true
+      highlight: tango
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+
+# Preparations
+## Set global options
+
+```{r style, results="asis", cache=FALSE, message = F, echo=FALSE}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+
+
+# Pretty outputs
+library("rmarkdown")
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+library("ggpubr")
+
+# Set seed for reproducibility
+set.seed(100)
+
+# Set plotting theme
+theme_set(theme_few(base_size = 14))
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+
+## Load libraries for the session
+```{r libraries, message=FALSE}
+library("magrittr")
+library("ggplot2")
+library("tidyverse")
+library("readxl")
+library("dada2")
+library("phyloseq")
+library("gridExtra")
+library("vegan")
+library("plyr")
+library("scales")
+library("reshape2")
+library("DESeq2")
+library("dplyr") #for data manipulation
+library("msa") #multiple sequence alignment
+library("ape") #to create phylogenetic tree
+library("randomForest") 
+library("caret") 
+library("broom")
+library("mlbench")
+library("plotROC")
+library("rio")
+
+```
+
+## Import data: no agglomeration
+```{r import data}
+# Phyloseq object: Filtered ASV based from ST Samples
+d.ps_ST1 <- "~/IKMB/projects/MS/github.codes.ms/ms.before.after/data"
+ps_ST1 <- "ps.ms.stool.rds" %>%
+  paste0(d.ps_ST1,"/", .) %>% 
+  readRDS() 
+ps_ST1
+
+ps_ST <- subset_samples(ps_ST1, Ocrevus %in% "yes")
+ps_ST
+
+t <- data.frame(sample_data(ps_ST))
+
+```
+
+```{r}
+#create a new column in sample data
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP1"] <- "MS.TP1"
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP2"] <- "MS.TP2"
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP3"] <- "MS.TP3"
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP4"] <- "MS.TP4"
+```
+
+## Edit
+Now I will do diversity analysis based on Stool Samples,filtered, non agglomerated data.
+Input: ps_ST
+
+```{r, message=FALSE}
+#Add a column named Group (Before=TP0,TP1 and After=TP2,TP3)
+sample_data(ps_ST)$Group[sample_data(ps_ST)$TimePoint %in%
+                           c("TP1")] <- "Before"
+sample_data(ps_ST)$Group[sample_data(ps_ST)$TimePoint %in%
+                           c("TP2", "TP3", "TP4")] <- "After"
+```
+
+```{r}
+#Ocrevus: yes
+ps_ST2 <- subset_samples(ps_ST, TimePoint %in% c("TP1", "TP2"))
+dim(sample_data(ps_ST2))
+ps_ST3 <- subset_samples(ps_ST, TimePoint %in% c("TP1", "TP3"))
+dim(sample_data(ps_ST3))
+ps_ST4 <- subset_samples(ps_ST, TimePoint %in% c("TP1", "TP4"))
+dim(sample_data(ps_ST4))
+
+```
+
+
+# Beta diversity
+
+  * How different is the microbial composition in one environment compared to another?
+  * We compute the dissimilarity matrix using one of the appropriate distances 
+  for microbiome data: Bray-Curtis.
+
+## Distance matrix
+```{r}
+#Bray-Curtis for ST samples:
+bray_distST2 = phyloseq::distance(ps_ST, method="bray", weighted=T)
+
+```
+
+```{r}
+#Check if we have outliers
+o.outlier <- outlier(as.matrix(bray_distST2),thresh=-2.8,y=0.5)
+o.outlier                                    
+plot(o.outlier)            
+```
+
+
+# Ordination
+Measures the similarity of the samples and projects this measure into 2-dimensions.
+
+## NMDS 
+**Stress**: value representing the difference between distance in the reduced 
+dimension compared to the complete multidimensional space.
+
+**NMDS**: tries to minimize the stress value using gradient decent.
+
+### ST Samples
+Question 1: Check if Centroids of clusters Before and After treatment differ
+
+
+```{r}
+#create a new column in sample data
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP1"] <- "MS.TP1"
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP2"] <- "MS.TP2"
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP3"] <- "MS.TP3"
+sample_data(ps_ST)$Status[sample_data(ps_ST)$TimePoint %in% "TP4"] <- "MS.TP4"
+```
+
+
+# Homogeneity of group dispersions MS before vs after treatment
+
+```{r}
+#Calculate dispersion (variances) within each group.
+disp.group = betadisper(bray_distST2, sample_data(ps_ST)$Status)
+#Perform an ANOVA-like test to determine if the variances differ by groups.
+permutest(disp.group, pairwise=TRUE, permutations=1000)
+```
+
+```{r}
+#Ocrevus: yes
+ps_ST2 <- subset_samples(ps_ST, TimePoint %in% c("TP1", "TP2"))
+dim(sample_data(ps_ST2))
+ps_ST3 <- subset_samples(ps_ST, TimePoint %in% c("TP1", "TP3"))
+dim(sample_data(ps_ST3))
+ps_ST4 <- subset_samples(ps_ST, TimePoint %in% c("TP1", "TP4"))
+dim(sample_data(ps_ST4))
+
+```
+
+## Distance matrix
+```{r}
+#Bray-Curtis for ST samples:
+bray_distST2 = phyloseq::distance(ps_ST2, method="bray", weighted=T)
+
+bray_distST3 = phyloseq::distance(ps_ST3, method="bray", weighted=T)
+
+bray_distST4 = phyloseq::distance(ps_ST4, method="bray", weighted=T)
+```
+
+
+To account for correlation within samples we use adonis2 with option 'strata'
+```{r}
+# ST samples
+
+permanova1 <- adonis2(bray_distST2 ~ sample_data(ps_ST2)$Group,
+                     strata = sample_data(ps_ST2)$Samples)
+
+permanova1
+
+
+permanova2 <- adonis2(bray_distST3 ~ sample_data(ps_ST3)$Group,
+                     strata = sample_data(ps_ST3)$Samples)
+
+permanova2
+
+
+
+permanova3 <- adonis2(bray_distST4 ~ sample_data(ps_ST4)$Group,
+                       strata = sample_data(ps_ST4)$Samples)
+
+permanova3
+    
+```
+
+```{r}
+#tables
+
+t1 <- data.frame(Groups = "After (TP2) vs Before(TP1)",
+                 Test = "Adonis2",
+                 Distance = "Bray",
+                 Df = permanova1[1,]$Df,
+                 SumOfSqs = permanova1[1,]$SumOfSqs,
+                 R2 = permanova1[1,]$R2,
+                 F = permanova1[1,]$F,
+                 Pvalue = permanova1[1,]$`Pr(>F)`)
+```
+
+```{r}
+#tables
+
+t2 <- data.frame(Groups = "After (TP3) vs Before(TP1)",
+                 Test = "Adonis2",
+                 Distance = "Bray",
+                 Df = permanova2[1,]$Df,
+                 SumOfSqs = permanova2[1,]$SumOfSqs,
+                 R2 = permanova2[1,]$R2,
+                 F = permanova2[1,]$F,
+                 Pvalue = permanova2[1,]$`Pr(>F)`)
+```
+
+```{r}
+#tables
+
+t3 <- data.frame(Groups = "After (TP4) vs Before(TP1)",
+                 Test = "Adonis2",
+                 Distance = "Bray",
+                 Df = permanova3[1,]$Df,
+                 SumOfSqs = permanova3[1,]$SumOfSqs,
+                 R2 = permanova3[1,]$R2,
+                 F = permanova3[1,]$F,
+                 Pvalue = permanova3[1,]$`Pr(>F)`)
+```
+
+
+# Final models
+
+```{r}
+#merge tables
+before.after <- rbind(t1, t2, t3)
+```
+
+# save output
+
+```{r}
+#export(before.after, "MS.stool.before.after.ordination.oc.xlsx")
+```
+
+# Session info
+
