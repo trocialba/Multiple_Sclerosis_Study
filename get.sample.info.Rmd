@@ -1,0 +1,134 @@
+---
+title: "Prepare data for DADA2:MS"
+author: "Alba Troci"
+date: "`r Sys.Date()`"
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged
+      self_contained: true
+      code_download: true
+      highlight: tango
+#bibliography: mylib.bib
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+
+# Introduction
+
+Objectives: Prepare data for DADA2 pipeline
+Input: excel metadata tables from Corinna
+Output: fastq files ? (data from here will be input for DADA2 pipeline)
+
+# Preparations 
+
+## Set global options
+
+```{r style, echo = T, results="asis", cache=FALSE, message = F}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+library("rmarkdown")
+
+# Pretty outputs
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+theme_set(theme_few(base_size = 14))
+
+# Set seed for reproducibility
+set.seed(13)
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+## Load libraries for the session
+
+```{r}
+library(magrittr)
+library(ggplot2)
+library(tidyverse)
+library(readxl)
+
+```
+
+## Import data
+```{r}
+
+  seqinfo <- "/home/alba/Desktop/Alba/Practice/MS2/metadata/Metadata.xlsx" %>% 
+  read_xlsx(.name_repair = make.names) %>% 
+  set_colnames(make.names(colnames(.), unique = T))
+```
+
+# Format seqinfo
+
+```{r}
+seqinfo$SampleId <- seqinfo$SampleID
+seqinfo <- seqinfo %>% 
+  separate(NGS.Code, into = c("Run", "id.in.run"), sep = "-", remove = T) %>% 
+  separate(SampleID, into = c("SampleNr", "TimePoint", "SampleType"), 
+           sep = "_", remove = T) 
+
+```
+
+
+# Get sample info
+This is because the sample info is in the seq info file provided by Corinna.
+
+```{r}
+sample.info <- seqinfo
+```
+
+# Remove rows with no sample sequenced
+
+```{r}
+sample.info <- sample.info %>% 
+  filter(!is.na(NewID))
+```
+
+# Are there any duplicates?
+```{r}
+dup <- seqinfo$NewID[duplicated(seqinfo$NewID)]
+length(dup)
+print(dup)
+```
+
+# Remove duplicates
+Because I do not know how to solve the duplicated samples, these could be different samples assigned to the same library. I will remove them from donwstream analysis.
+
+```{r}
+seqinfo <- seqinfo %>% 
+  filter(!NewID %in% dup)
+```
+
+
+# Save sample information
+
+```{r}
+"sample.info.rds" %>% 
+  #paste0(d.out, "/", .) %>% 
+  saveRDS(sample.info, .)
+```
+
+
+# Session information
+
+```{r}
+#sessionInfo()
+```
