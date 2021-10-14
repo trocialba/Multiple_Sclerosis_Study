@@ -1,0 +1,314 @@
+---
+title: "Diversity Analysis: MS-O vs HC.stool; MS-nO vs HC.stool"
+author: "Alba Troci"
+date: "`r Sys.Date()`"  
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged
+      self_contained: true
+      code_download: true
+      highlight: tango
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+
+# Preparations
+## Set global options
+
+```{r style, results="asis", cache=FALSE, message = F, echo=FALSE}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+
+
+# Pretty outputs
+library("rmarkdown")
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+library("ggpubr")
+
+# Set seed for reproducibility
+set.seed(100)
+
+# Set plotting theme
+theme_set(theme_few(base_size = 14))
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+
+## Load libraries for the session
+```{r libraries, message=FALSE}
+library("magrittr")
+library("ggplot2")
+library("tidyverse")
+library("readxl")
+library("dada2")
+library("phyloseq")
+library("gridExtra")
+library("vegan")
+library("plyr")
+library("scales")
+library("reshape2")
+library("DESeq2")
+library("dplyr") 
+library("msa") 
+library("ape") 
+library("randomForest") 
+library("caret") 
+library("broom")
+library("mlbench")
+library("plotROC")
+library("car")
+library("MASS")
+library("lme4")
+library("lmerTest")
+library("fitdistrplus")
+library("psycho")
+library("rstatix")
+library("coin")
+library("plotROC")
+library("gg3D")
+library("scatterplot3d")
+library("car")
+library("rgl")
+library("rglwidget")
+library("rstatix")
+library("coin")
+library("compareGroups")
+```
+
+## Import data: no agglomeration
+
+```{r import data}
+# Phyloseq object: Filtered ASV based from MS+Healthy samples 
+d.ps1_HMS <-"~/IKMB/projects/MS/github.codes.ms/ms.vs.hc/data"
+ps1_HMS <- "ps_HMS.subset.stool.itm.rds" %>%
+  paste0(d.ps1_HMS,"/", .) %>% 
+  readRDS() 
+ps1_HMS
+
+```
+
+
+## Edit
+```{r}
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "Healthy"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "MS"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Ocrevus %in% "yes"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Ocrevus %in% "no"])
+```
+
+```{r}
+sample_data(ps1_HMS)$TimePoint[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "TP0"
+
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "HC"
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Ocrevus %in% "yes"] <- "MS-O"
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Ocrevus %in% "no"] <- "MS-nO"
+
+```
+
+```{r}
+ps.hms <- subset_samples(ps1_HMS, Status %in% c("HC", "MS-O", "MS-nO"))
+ps.hms
+
+sam <- data.frame(sample_data(ps.hms))
+
+```
+
+
+# Alpha diversity test
+
+## Rarefaction
+We need to rarefy before alpha diversity:
+
+```{r, message=FALSE}
+# We will subsample to the min number of reads
+summary(sample_sums(ps.hms))
+sample_sums(ps.hms)
+```
+
+
+```{r}
+ps.hms
+ps_merge.rar <- rarefy_even_depth(ps.hms, sample.size = min(sample_sums(ps.hms)))
+ps_merge.rar
+
+```
+
+Subset only HC and MS in baseline
+
+```{r}
+ps.h <- subset_samples(ps_merge.rar, Status == "HC")
+ps.h
+
+ps.1 <- subset_samples(ps_merge.rar, TimePoint %in% c("TP0", "TP1"))
+ps.1
+```
+
+
+```{r}
+theme_set(theme_bw())
+
+#estimate shannon alpha diversity measure
+alpha1 <- estimate_richness(ps.1, split = TRUE, measures = "shannon")
+
+df = cbind(sample_data(ps.1)[, "Age", drop=FALSE], alpha1)
+df$Sex <- sample_data(ps.1)$Sex
+df$Status <- sample_data(ps.1)$Status
+df
+```
+
+Create separate tables for MS-O and MS-nO
+```{r}
+df1 <- df[(df$Status %in% c("HC", "MS-O")), ]
+df2 <- df[(df$Status %in% c("HC", "MS-nO")), ]
+```
+
+Test for Covariates 
+```{r}
+#For MS-O vs HC
+#Chi-square to check if factor are dependent
+res <- compareGroups(Status ~ Age + Sex,data = df1, Q1=0.25, Q3=0.75 )
+createTable(res)
+
+#For MS-nO vs HC
+#Chi-square to check if factor are dependent
+res2 <- compareGroups(Status ~ Age + Sex,data = df2, Q1=0.25, Q3=0.75 )
+createTable(res2)
+```
+
+Test if Shannon values are normally distributed
+```{r}
+#For MS-O vs HC
+hist(df1$Shannon,probability=T, main="MS-O vs Healthy",xlab="Shannon") 
+lines(density(df1$Shannon),col=2)
+shapiro.test(df1$Shannon)
+
+
+#For MS-O vs HC
+hist(df2$Shannon,probability=T, main="MS-nO vs Healthy",xlab="Shannon") 
+lines(density(df2$Shannon),col=2)
+shapiro.test(df2$Shannon)
+```
+
+Test relationship between Shannon alpha diversity measure and Status (MS-O vs HC)
+```{r}
+#shannon
+w1 <- wilcox.test(Shannon ~ Status, data = df1,conf.int=TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+w1
+
+#df1 %>% cohens_d(Shannon ~ Status, var.equal = TRUE, hedges.correction = TRUE)
+effect1 <- df1 %>% wilcox_effsize(Shannon ~ Status)
+effect1
+```
+
+```{r}
+#create tabl values
+
+t.Shannon1 <- data.frame(Status = "MS-O vs HC", 
+                 DataName = w1$data.name,
+                 Method = w1$method,
+                 MS.Baseline = effect1$n2, HC = effect1$n1, 
+                 Statistic = w1$statistic, 
+                 EffectSize = effect1$effsize,
+                 Pvalue = w1$p.value)
+```
+
+
+Test relationship between Shannon alpha diversity measure and Status (MS-nO vs HC)
+```{r}
+# wilcox. test for Shannon: evenness
+compare2 <- pairwise.wilcox.test(df2$Shannon, 
+                                 df2$Status,
+                                 alternative = "two.sided",
+                                 p.adjust.method = "bonferroni",exact=FALSE)
+compare2
+```
+
+```{r}
+#shannon
+w2 <- wilcox.test(Shannon ~ Status, data = df2,conf.int=TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+w2
+
+#df1 %>% cohens_d(Shannon ~ Status, var.equal = TRUE, hedges.correction = TRUE)
+effect2 <- df2 %>% wilcox_effsize(Shannon ~ Status)
+effect2
+```
+
+```{r}
+#create tabl values
+
+t.Shannon2 <- data.frame(Status = "MS-nO vs HC", 
+                 DataName = w2$data.name,
+                 Method = w2$method,
+                 MS.Baseline = effect2$n2, HC = effect2$n1, 
+                 Statistic = w2$statistic, 
+                 EffectSize = effect2$effsize,
+                 Pvalue = w2$p.value)
+```
+
+
+# Alpha diversity plot
+
+Prepare data table for ggplot
+```{r}
+df200 <- df[c("Shannon", "Status")]
+df200$Value <- df200$Shannon
+df200$Measure <- "Shannon"
+df200$Shannon <- NULL
+
+df200$Group[df200$Status %in% "HC"] <- "HC"
+df200$Group[df200$Status %in% "MS-O"] <- "MS"
+df200$Group[df200$Status %in% "MS-nO"] <- "MS"
+
+colnames(df200) <- c("Group" ,  "Value" ,  "Measure", "Status" )
+```
+
+Add specific colors
+```{r}
+cols <- c("royalblue4", "tomato4", "orange3")
+```
+
+Plot
+```{r}
+theme_set(theme_bw())
+
+p <- ggplot(df200, aes(x=Group, y=Value, color=Group)) +
+  geom_boxplot(alpha = 2, na.rm = TRUE, outlier.size = 0)+ 
+                        
+                       theme(text = element_text(size = 15)) +
+                       scale_colour_manual(values = cols) +
+                       labs(y="Alpha diversity measure", x = "Group") +
+                       scale_y_continuous(expand = expansion(mult = c(0, 0.4)))
+
+hms.baseline.stool.shannon <- p + facet_wrap(~Measure, scale="free")
+hms.baseline.stool.shannon 
+#ggsave("hms.baseline.stool.shannon.space.png")
+```
+
+
+
+# Session info
+
+
