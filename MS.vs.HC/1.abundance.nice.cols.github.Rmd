@@ -1,0 +1,204 @@
+---
+title: "Diversity Analysis: MS baseline vs HC.stool"
+author: "Alba Troci"
+date: "`r Sys.Date()`"  
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged
+      self_contained: true
+      code_download: true
+      highlight: tango
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+
+# Preparations
+## Set global options
+
+```{r style, results="asis", cache=FALSE, message = F, echo=FALSE}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+
+
+# Pretty outputs
+library("rmarkdown")
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+library("ggpubr")
+
+# Set seed for reproducibility
+set.seed(100)
+
+# Set plotting theme
+theme_set(theme_few(base_size = 14))
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+
+## Load libraries for the session
+```{r libraries, message=FALSE}
+library("magrittr")
+library("ggplot2")
+library("tidyverse")
+library("readxl")
+library("dada2")
+library("phyloseq")
+library("gridExtra")
+library("vegan")
+library("plyr")
+library("scales")
+library("reshape2")
+library("DESeq2")
+library("dplyr") #for data manipulation
+library("msa") #multiple sequence alignment
+library("ape") #to create phylogenetic tree
+library("randomForest") 
+library("caret") 
+library("broom")
+library("mlbench")
+library("plotROC")
+library("car")
+library("MASS")
+library("lme4")
+library("lmerTest")
+library("fitdistrplus")
+library("psycho")
+library("rstatix")
+library("coin")
+library("compareGroups")
+library("RColorBrewer")
+
+```
+## Import data: no agglomeration
+```{r import data}
+# Phyloseq object: Filtered ASV based from MS+Healthy samples 
+d.ps1_HMS <- "~/IKMB/projects/MS/github.codes.ms/ms.vs.hc/data"
+ps1_HMS <- "ps_HMS.subset.stool.itm.rds" %>%
+  paste0(d.ps1_HMS,"/", .) %>% 
+  readRDS() 
+ps1_HMS
+
+```
+
+## Edit
+```{r}
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "Healthy"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Status %in% "MS"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Ocrevus %in% "yes"])
+dim(sample_data(ps1_HMS)[sample_data(ps1_HMS)$Ocrevus %in% "no"])
+```
+
+```{r}
+sample_data(ps1_HMS)$TimePoint[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "TP0"
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Status %in% "Healthy"] <- "HC"
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Ocrevus %in% "yes"] <- "MS-O"
+sample_data(ps1_HMS)$Status[sample_data(ps1_HMS)$Ocrevus %in% "no"] <- "MS-nO"
+
+```
+
+```{r}
+ps.hms <- subset_samples(ps1_HMS, Status %in% c("HC", "MS-O", "MS-nO"))
+ps.hms
+
+sam <- data.frame(sample_data(ps.hms))
+
+```
+
+```{r}
+ps.1 <- subset_samples(ps.hms, TimePoint %in% c("TP0", "TP1"))
+ps.1
+
+sam01 <- data.frame(sample_data(ps.1))
+
+```
+
+```{r}
+#Chi-square to check if factor are dependent
+res <- compareGroups(Status ~ Age + Sex,data = sam01, Q1=0.25, Q3=0.75 )
+
+createTable(res)
+
+```
+
+
+**Agglomerate**
+
+* Agglomerate closely related taxa, genus level.
+```{r}
+ps1_glom <- tax_glom(ps.1, taxrank = "Genus", NArm = TRUE)
+ps1_glom
+
+ps2_glom <- tax_glom(ps.1, taxrank = "Phylum", NArm = TRUE)
+ps2_glom
+
+#t <- as.data.frame(tax_table(ps1_glom)[1:10, 1:16])
+ps1_rel = phyloseq::transform_sample_counts(ps1_glom, function(x){x / sum(x)})
+ps2_rel = phyloseq::transform_sample_counts(ps1_glom, function(x){x})
+
+```
+
+
+**Total abundance after agglomeration for MS vs HC**
+
+Set manual colors to each phylum in order to be consistent with all figure 
+colors in the whole manuscript
+
+```{r}
+unique(tax_table(ps1_rel)[,"Phylum"])  
+cols <- c("Acidobacteria"= "#61864B",
+          "Actinobacteria" = "#C46226",
+          "Bacteria (unc.)"= "#A96755",
+          "Bacteroidetes" = "#666666" ,
+          "Candidatus_Saccharibacteria" = "#767F3E" ,
+          "Firmicutes" = "#77942C",
+          "Fusobacteria"= "#B1A80D",
+          "Proteobacteria" = "#E1A703", 
+          "Spirochaetes" = "#946A7C", 
+          "SR1"="#C48F10",
+          "Synergistetes"= "#957130",
+          "Tenericutes"="#7B6EA6",
+          "Verrucomicrobia" = "#935DA8")           
+```
+
+```{r}
+theme_set(theme_bw())
+p <- phyloseq::plot_bar(ps1_rel, fill = "Phylum") +
+  geom_bar(aes(color = Phylum, fill = Phylum), stat = "identity", position = "stack", width = 0.5) +
+  labs(x = "Samples", y = "Relative Abundance\n") +
+  facet_grid(~ Status, scales = "free", space="free") +
+  theme(text = element_text(size = 8),
+        panel.background = element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        panel.spacing=unit(0.1, "lines"), #facet spacing
+        legend.spacing.y = unit(0.4, 'cm'),
+        legend.key.size = unit(0.4, "cm"),
+        line =element_line(size = 0.2))+
+  scale_colour_manual(values = cols)+
+    scale_fill_manual(values = cols)
+
+p 
+
+abundance.hms2.stool.ono <- p
+#ggsave("abundance.hms2.stool.ono.png")
+```
