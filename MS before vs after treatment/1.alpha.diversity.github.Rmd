@@ -1,0 +1,694 @@
+---
+title: "Diversity Analysis MS before vs after treatment, stool"
+author: "Alba Troci"
+date: "`r Sys.Date()`"  
+output:
+   BiocStyle::html_document:
+      toc: true
+      df_print: paged
+      self_contained: true
+      code_download: true 
+      highlight: tango
+editor_options:
+  chunk_output_type: console
+params:
+  FIGPATH: "figures/"
+  d.out: "./"
+---
+# Preparations
+## Set global options
+
+```{r style, results="asis", cache=FALSE, message = F, echo=FALSE}
+# Set knit global options
+library("knitr")
+options(digits = 2, width = 80)
+golden_ratio <- (1 + sqrt(5)) / 2
+opts_chunk$set(echo = TRUE,
+               tidy = FALSE,
+               include = TRUE,
+               fig.path = params$FIGPATH,
+               dev=c("png",'pdf'),
+               fig.height = 5,
+               fig.width = 4 * golden_ratio,
+               comment = '  ',
+               dpi = 300,
+               cache = FALSE)
+
+
+# Pretty outputs
+library("rmarkdown")
+library("BiocStyle")
+library("ggthemes") # add ggplot2 themes
+library("ggplot2")
+library("ggpubr")
+
+# Set seed for reproducibility
+set.seed(100)
+
+# Set plotting theme
+theme_set(theme_few(base_size = 14))
+
+# Set output directory
+d.out <- params$d.out
+rm(params)
+```
+
+
+## Load libraries for the session
+```{r libraries, message=FALSE}
+library("magrittr")
+library("ggplot2")
+library("tidyverse")
+library("readxl")
+library("dada2")
+library("phyloseq")
+library("gridExtra")
+library("vegan")
+library("plyr")
+library("scales")
+library("reshape2")
+library("DESeq2")
+library("dplyr") #for data manipulation
+library("msa") #multiple sequence alignment
+library("ape") #to create phylogenetic tree
+library("randomForest") 
+library("caret") 
+library("broom")
+library("mlbench")
+library("plotROC")
+library("car")
+library("MASS")
+library("lme4")
+library("lmerTest")
+library("fitdistrplus")
+library("psycho")
+library("rstatix")
+library("coin")
+library("compareGroups")
+library("rio")
+```
+
+## Import data: no agglomeration
+```{r import data}
+# Phyloseq object: Filtered ASV based from ST Samples
+d.ps_ST1 <- "~/IKMB/projects/MS/github.codes.ms/ms.before.after/data"
+ps_ST1 <- "ps.ms.stool.rds" %>%
+  paste0(d.ps_ST1,"/", .) %>% 
+  readRDS() 
+ps_ST1
+
+#Subset only treated samples
+ps_ST <- subset_samples(ps_ST1, Ocrevus %in% "yes")
+ps_ST
+
+t <- data.frame(sample_data(ps_ST))
+
+```
+
+
+## Sample overview and filter
+
+```{r}
+#total nr of read counts of each sample
+summary(sample_sums(ps_ST))
+sample_sum_df <- data.frame(sum = sample_sums(ps_ST))
+
+```
+
+```{r}
+#Data table
+data2 <- data.frame(Sample = sample_data(ps_ST)$NewID, 
+                   Participant = sample_data(ps_ST)$Samples,
+                   TimePoint = sample_data(ps_ST)$TimePoint)
+data2
+tp1 <- subset(data2, TimePoint == "TP1")
+```
+
+```{r}
+ggplot(data2, aes(x = TimePoint, y = Participant)) +
+  geom_point()
+```
+
+## Edit
+Now I will do diversity analysis based on Stool Samples,filtered, non agglomerated data.
+Input: ps_ST
+
+```{r, message=FALSE}
+#Add a column named Group (Before=TP0,TP1 and After=TP2,TP3)
+sample_data(ps_ST)$Group[sample_data(ps_ST)$TimePoint %in%
+                           c("TP0", "TP1" )] <- "Before"
+sample_data(ps_ST)$Group[sample_data(ps_ST)$TimePoint %in%
+                           c("TP2", "TP3", "TP4" )] <- "After"
+```
+
+```{r}
+#Ocrevus: yes (double check step)
+ps_ST_oc <- subset_samples(ps_ST, Ocrevus == "yes")
+ps_ST.TP2 <- subset_samples(ps_ST_oc, TimePoint %in% c("TP1", "TP2"))
+dim(sample_data(ps_ST.TP2))
+ps_ST.TP3 <- subset_samples(ps_ST_oc, TimePoint %in% c("TP1", "TP3"))
+dim(sample_data(ps_ST.TP3))
+ps_ST.TP4 <- subset_samples(ps_ST_oc, TimePoint %in% c("TP1", "TP4"))
+dim(sample_data(ps_ST.TP4))
+
+```
+
+## Rarefaction: no agglomeration
+We need to rarefy before alpha diversity:
+
+```{r, message=FALSE}
+set.seed(300)
+summary(sample_sums(ps_ST.TP2))
+summary(sample_sums(ps_ST.TP3))
+summary(sample_sums(ps_ST.TP4))
+```
+
+```{r}
+psST2.rar <- rarefy_even_depth(ps_ST.TP2, sample.size = min(sample_sums(ps_ST.TP2)))
+psST2.rar
+
+psST3.rar <- rarefy_even_depth(ps_ST.TP3, sample.size = min(sample_sums(ps_ST.TP3)))
+psST3.rar
+
+psST4.rar <- rarefy_even_depth(ps_ST.TP4, sample.size = min(sample_sums(ps_ST.TP4)))
+psST4.rar
+```
+
+# Alpha diversity
+
+Here I will use rarefied samples as an input, split them into Groups Treated and 
+non Treated, then compute alpha diversity seperately.
+
+## ST.TP2
+```{r, message=FALSE}
+
+# Richness (nr of species in on environment)
+richness <- estimate_richness(psST2.rar, split = TRUE, measures = "shannon")
+richness2 <- estimate_richness(psST2.rar, split = TRUE, measures = "Chao1")
+richness3 <- estimate_richness(psST2.rar, split = TRUE, measures = "InvSimpson")
+
+#Diversity values in one table only
+rich <- estimate_richness(psST2.rar, measures = c("Shannon", "Chao1", "InvSimpson"))
+head(rich)
+
+```
+
+## ST.TP3
+```{r, message=FALSE}
+
+# Richness (nr of species in on environment)
+richness31 <- estimate_richness(psST3.rar, split = TRUE, measures = "shannon")
+richness32 <- estimate_richness(psST3.rar, split = TRUE, measures = "Chao1")
+richness33 <- estimate_richness(psST3.rar, split = TRUE, measures = "InvSimpson")
+
+#Diversity values in one table only
+rich3 <- estimate_richness(psST3.rar, measures = c("Shannon", "Chao1", "InvSimpson"))
+head(rich3)
+
+```
+
+## ST.TP4
+```{r, message=FALSE}
+
+# Richness (nr of species in on environment)
+richness41 <- estimate_richness(psST4.rar, split = TRUE, measures = "shannon")
+richness42 <- estimate_richness(psST4.rar, split = TRUE, measures = "Chao1")
+richness43 <- estimate_richness(psST4.rar, split = TRUE, measures = "InvSimpson")
+
+#Diversity values in one table only
+rich4 <- estimate_richness(psST4.rar, measures = c("Shannon", "Chao1", "InvSimpson"))
+head(rich4)
+
+```
+
+# First approach: Fit a model
+## Preparations
+I will create two data.frames with Age,Sex,Group,TimePoint, Chao1 alpha diversity for Treated and non Treated and then merge together in one for further analysis.
+
+### MS.TP1 vs MS.TP2
+```{r}
+#Prepare a data.frame for Treated group.
+
+df1 = cbind(sample_data(psST2.rar)[, "Samples", drop=FALSE], richness2)
+df1$Shannon <- richness$Shannon
+df1$InvSimpson <- richness3$InvSimpson
+df1$Age <- sample_data(psST2.rar)$Age
+df1$Sex <- sample_data(psST2.rar)$Sex
+df1$Group <- sample_data(psST2.rar)$Group
+df1$TimePoint <- sample_data(psST2.rar)$TimePoint
+df1$ParticipantID <- sample_names(psST2.rar)
+df1$logChao1 <- log(df1$Chao1)
+df1$Treat <- sample_data(psST2.rar)$Ocrevus
+df1 <- df1[c(1,3,4,5,6,7,2,8,9,10,11,12)]
+df1
+
+#samples are in each time point
+table(df1$TimePoint)
+```
+
+```{r}
+#select only duplicated elements
+xu1 <- df1$Samples[duplicated(df1$Samples)]
+xu1
+
+df11 <- subset(df1, Samples %in% xu1)
+df11
+```
+
+
+#### Chao1
+
+```{r}
+#Check for normal distribution
+shapiro.test(df11$Chao1)
+hist(df11$Chao1,probability=T, main="MS.TP1 vs MS.TP2",xlab="Chao1") 
+lines(density(df11$Chao1),col=2)
+
+```
+
+
+```{r}
+test1 <- t.test(Chao1 ~ Group, data = df11, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test1
+
+```
+
+```{r}
+##effect size
+effect1 <- df11 %>% cohens_d(Chao1 ~ Group, var.equal = TRUE, hedges.correction = TRUE)
+effect1
+
+```
+
+```{r}
+#create tabl values
+
+t1 <- data.frame(Group = "After(TP2) vs Before(TP1)", 
+                 DataName = test1$data.name,
+                 Method = test1$method,
+                 After = effect1$n2, Before = effect1$n1, 
+                 Statistic = test1$statistic, 
+                 #df = test1$parameter, 
+                 EffectSize = effect1$effsize,
+                 Pvalue = test1$p.value)
+```
+
+
+#### Shannon
+
+```{r}
+shapiro.test(df11$Shannon)
+hist(df11$Shannon,probability=T, main="MS.TP1 vs MS.TP2",xlab="Shannon") 
+lines(density(df11$Shannon),col=2)
+
+```
+
+
+```{r}
+test12 <- wilcox.test(Shannon ~ Group, data = df11, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test12
+
+```
+
+```{r}
+##effect size
+effect12 <- wilcox_effsize(df11, Shannon ~ Group, paired = TRUE)
+effect12
+
+```
+
+```{r}
+#create tabl values
+
+t12 <- data.frame(Group = "After(TP2) vs Before(TP1)", 
+                 DataName = test12$data.name,
+                 Method = test12$method,
+                 After = effect12$n2, Before = effect12$n1, 
+                 Statistic = test12$statistic, 
+                 #df = test12$parameter, 
+                 EffectSize = effect12$effsize,
+                 Pvalue = test12$p.value)
+```
+
+#### InvSimpson
+
+```{r}
+shapiro.test(df11$InvSimpson)
+hist(df11$InvSimpson,probability=T, main="MS.TP1 vs MS.TP2",xlab="InvSimpson") 
+lines(density(df11$InvSimpson),col=2)
+
+```
+
+
+```{r}
+test13 <- wilcox.test(InvSimpson ~ Group, data = df11, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test13
+
+```
+
+```{r}
+##effect size
+effect13 <- wilcox_effsize(df11, InvSimpson ~ Group, paired = TRUE)
+effect13
+
+```
+
+```{r}
+#create tabl values
+
+t13 <- data.frame(Group = "After(TP2) vs Before(TP1)", 
+                 DataName = test13$data.name,
+                 Method = test13$method,
+                 After = effect13$n2, Before = effect13$n1, 
+                 Statistic = test13$statistic, 
+                 #df = test12$parameter, 
+                 EffectSize = effect13$effsize,
+                 Pvalue = test13$p.value)
+```
+
+
+## MS:TP1 vs MS.TP3
+```{r}
+#Prepare a data.frame for Treated group.
+
+df2 = cbind(sample_data(psST3.rar)[, "Samples", drop=FALSE], richness32)
+df2$Shannon <- richness31$Shannon
+df2$InvSimpson <- richness33$InvSimpson
+df2$Age <- sample_data(psST3.rar)$Age
+df2$Sex <- sample_data(psST3.rar)$Sex
+df2$Group <- sample_data(psST3.rar)$Group
+df2$TimePoint <- sample_data(psST3.rar)$TimePoint
+df2$ParticipantID <- sample_names(psST3.rar)
+df2$logChao1 <- log(df2$Chao1)
+df2$Treat <- sample_data(psST3.rar)$Ocrevus
+df2 <- df2[c(1,3,4,5,6,7,2,8,9,10,11,12)]
+df2
+
+#samples are in each time point
+table(df2$TimePoint)
+```
+
+```{r}
+#select only duplicated elements
+xu2 <- df2$Samples[duplicated(df2$Samples)]
+xu2
+
+df22 <- subset(df2, Samples %in% xu2)
+df22
+
+```
+
+
+#### Chao1
+
+```{r}
+shapiro.test(df22$Chao1)
+hist(df22$Chao1,probability=T, main="MS.TP1 vs MS.TP3",xlab="Chao1") 
+lines(density(df22$Chao1),col=2)
+
+
+```
+
+```{r}
+test2 <- t.test(Chao1 ~ Group, data = df22, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+```
+
+```{r}
+##effect size
+effect2 <- df22 %>% cohens_d(Chao1 ~ Group, var.equal = TRUE, hedges.correction = TRUE)
+
+```
+
+```{r}
+#create tabl values
+
+t2 <- data.frame(Group = "After(TP3) vs Before(TP1)", 
+                 DataName = test2$data.name,
+                 Method = test2$method,
+                 After = effect2$n2, Before = effect2$n1, 
+                 Statistic = test2$statistic, 
+                 #df = test2$parameter, 
+                 EffectSize = effect2$effsize,
+                 Pvalue = test2$p.value)
+```
+
+
+#### Shannon
+
+```{r}
+shapiro.test(df22$Shannon)
+hist(df22$Shannon,probability=T, main="MS.TP1 vs MS.TP3",xlab="Shannon") 
+lines(density(df22$Shannon),col=2)
+
+```
+
+
+```{r}
+test22 <- wilcox.test(Shannon ~ Group, data = df22, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test22
+
+```
+
+```{r}
+##effect size
+
+effect22 <- wilcox_effsize(df22, Shannon ~ Group, paired = TRUE)
+effect22
+
+```
+
+```{r}
+#create tabl values
+
+t22 <- data.frame(Group = "After(TP3) vs Before(TP1)", 
+                 DataName = test22$data.name,
+                 Method = test22$method,
+                 After = effect22$n2, Before = effect22$n1, 
+                 Statistic = test22$statistic, 
+                 #df = test12$parameter, 
+                 EffectSize = effect22$effsize,
+                 Pvalue = test22$p.value)
+```
+
+#### InvSimpson
+
+```{r}
+shapiro.test(df22$InvSimpson)
+hist(df22$InvSimpson,probability=T, main="MS.TP1 vs MS.TP3",xlab="InvSimpson") 
+lines(density(df22$InvSimpson),col=2)
+
+```
+
+
+```{r}
+test23 <- wilcox.test(InvSimpson ~ Group, data = df22, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test23
+
+```
+
+```{r}
+##effect size
+
+effect23 <- wilcox_effsize(df22, InvSimpson ~ Group, paired = TRUE)
+
+effect23
+
+```
+
+```{r}
+#create tabl values
+
+t23 <- data.frame(Group = "After(TP3) vs Before(TP1)", 
+                 DataName = test23$data.name,
+                 Method = test23$method,
+                 After = effect23$n2, Before = effect23$n1, 
+                 Statistic = test23$statistic, 
+                 #df = test12$parameter, 
+                 EffectSize = effect23$effsize,
+                 Pvalue = test23$p.value)
+```
+
+
+## MS:TP1 vs MS.TP4
+```{r}
+#Prepare a data.frame for Treated group.
+
+df3 = cbind(sample_data(psST4.rar)[, "Samples", drop=FALSE], richness42)
+df3$Shannon <- richness41$Shannon
+df3$InvSimpson <- richness43$InvSimpson
+df3$Age <- sample_data(psST4.rar)$Age
+df3$Sex <- sample_data(psST4.rar)$Sex
+df3$Group <- sample_data(psST4.rar)$Group
+df3$TimePoint <- sample_data(psST4.rar)$TimePoint
+df3$ParticipantID <- sample_names(psST4.rar)
+df3$logChao1 <- log(df3$Chao1)
+df3$Treat <- sample_data(psST4.rar)$Ocrevus
+df3 <- df3[c(1,3,4,5,6,7,2,8,9,10,11,12)]
+df3
+
+#samples are in each time point
+table(df3$TimePoint)
+```
+
+```{r}
+#select only duplicated elements
+xu3 <- df3$Samples[duplicated(df3$Samples)]
+xu3
+
+df33 <- subset(df3, Samples %in% xu3)
+df33
+
+```
+
+```{r}
+#test for covariates
+
+#Chi-square to check if factor are dependent
+res <- compareGroups(Group ~ Age + Sex,data = df33, Q1=0.25, Q3=0.75 )
+
+createTable(res)
+
+```
+
+####Chao1
+
+```{r}
+shapiro.test(df33$Chao1)
+hist(df33$Chao1,probability=T, main="MS.TP1 vs MS.TP4",xlab="Chao1") 
+lines(density(df33$Chao1),col=2)
+
+```
+
+```{r}
+test3 <- t.test(Chao1 ~ Group, data = df33, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+```
+
+```{r}
+##effect size
+effect3 <- df33 %>% cohens_d(Chao1 ~ Group, var.equal = TRUE, hedges.correction = TRUE)
+
+```
+
+```{r}
+#create tabl values
+
+t3 <- data.frame(Group = "After(TP4) vs Before(TP1)", 
+                 DataName = test3$data.name,
+                 Method = test3$method,
+                 After = effect3$n2, Before = effect3$n1, 
+                 Statistic = test3$statistic, 
+                 #df = test3$parameter, 
+                 EffectSize = effect3$effsize,
+                 Pvalue = test3$p.value)
+```
+
+#### Shannon
+
+```{r}
+shapiro.test(df33$Shannon)
+hist(df33$Shannon,probability=T, main="MS.TP1 vs MS.TP4",xlab="Shannon") 
+lines(density(df33$Shannon),col=2)
+
+```
+
+
+```{r}
+test32 <- wilcox.test(Shannon ~ Group, data = df33, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test32
+
+```
+
+```{r}
+##effect size
+
+effect32 <- wilcox_effsize(df33, Shannon ~ Group, paired = TRUE)
+effect32
+
+```
+
+```{r}
+#create tabl values
+
+t32 <- data.frame(Group = "After(TP4) vs Before(TP1)", 
+                 DataName = test32$data.name,
+                 Method = test32$method,
+                 After = effect32$n2, Before = effect32$n1, 
+                 Statistic = test32$statistic, 
+                 #df = test12$parameter, 
+                 EffectSize = effect32$effsize,
+                 Pvalue = test32$p.value)
+```
+
+#### InvSimpson
+
+```{r}
+shapiro.test(df33$InvSimpson)
+hist(df33$InvSimpson,probability=T, main="MS.TP1 vs MS.TP4",xlab="InvSimpson") 
+lines(density(df33$InvSimpson),col=2)
+
+```
+
+
+```{r}
+test33 <- wilcox.test(InvSimpson ~ Group, data = df33, paired = TRUE,
+       p.adjust.methods = "bonferroni",var.equal = TRUE)
+
+test33
+
+```
+
+```{r}
+##effect size
+
+effect33 <- wilcox_effsize(df33, InvSimpson ~ Group, paired = TRUE)
+
+effect33
+
+```
+
+```{r}
+#create tabl values
+
+t33 <- data.frame(Group = "After(TP4) vs Before(TP1)", 
+                 DataName = test33$data.name,
+                 Method = test33$method,
+                 After = effect33$n2, Before = effect33$n1, 
+                 Statistic = test33$statistic, 
+                 #df = test12$parameter, 
+                 EffectSize = effect33$effsize,
+                 Pvalue = test33$p.value)
+```
+
+
+# Final models
+
+```{r}
+#merge tables
+before.after <- rbind(t1, t12, t13, t2, t22, t23, t3, t32, t33)
+```
+
+# save output
+
+```{r}
+#export(before.after, "MS.stool.before.after.diversity.oc.xlsx")
+```
+
+
+# Session info
+
